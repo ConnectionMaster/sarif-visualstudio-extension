@@ -14,11 +14,11 @@ namespace Microsoft.CodeAnalysis.Sarif.Sarifer
     /// <summary>
     /// Performs static analysis in the background.
     /// </summary>
-    // TODO: Reanalyze when buffer changes.
-    // TODO: Remove error list items when buffer closes.
     [Export(typeof(IBackgroundAnalysisService))]
     internal class BackgroundAnalysisService : IBackgroundAnalysisService
     {
+        private const string TempLogSuffix = ".BackgroudAnalysis.Sariflog";
+
 #pragma warning disable CS0649 // Provided by MEF
         [ImportMany]
         private readonly IEnumerable<IBackgroundAnalyzer> analyzers;
@@ -96,6 +96,23 @@ namespace Microsoft.CodeAnalysis.Sarif.Sarifer
             await Task.WhenAll(tasks).ConfigureAwait(continueOnCapturedContext: false);
         }
 
+        public async Task CloseResultsAsync(string logId)
+        {
+            logId += TempLogSuffix;
+            foreach (IBackgroundAnalysisSink sink in this.sinks)
+            {
+                await sink.CloseAsync(new[] { logId }).ConfigureAwait(false);
+            }
+        }
+
+        private static void DisposeStreams(Stream[] streams)
+        {
+            foreach (Stream stream in streams)
+            {
+                stream.Dispose();
+            }
+        }
+
         private Task WriteStreamsToSinksAsync(string logId, Stream[] streams, bool cleanAll)
         {
             var sinkTasks = new List<Task>(this.analyzers.Count());
@@ -114,6 +131,10 @@ namespace Microsoft.CodeAnalysis.Sarif.Sarifer
 
         private async Task WriteToSinksAsync(string logId, Stream stream, bool cleanAll)
         {
+            // not use original file name to avoid adding file watcher on it.
+            // e.g. ...repo\src\Cache.cs to ...repo\src\Cache.cs.BackgroudAnalysis.Sariflog
+            logId += TempLogSuffix;
+
             foreach (IBackgroundAnalysisSink sink in this.sinks)
             {
                 stream.Seek(0L, SeekOrigin.Begin);
@@ -128,14 +149,6 @@ namespace Microsoft.CodeAnalysis.Sarif.Sarifer
                 }
 
                 await sink.ReceiveAsync(stream, logId).ConfigureAwait(false);
-            }
-        }
-
-        private static void DisposeStreams(Stream[] streams)
-        {
-            foreach (Stream stream in streams)
-            {
-                stream.Dispose();
             }
         }
     }

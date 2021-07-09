@@ -21,6 +21,7 @@ namespace Microsoft.Sarif.Viewer.ErrorList
     {
         private SarifErrorListItem currentlySelectedItem;
         private SarifErrorListItem currentlyNavigatedItem;
+        private IEnumerable<SarifErrorListItem> selectedItems;
 
         /// <inheritdoc/>
         public SarifErrorListItem SelectedItem
@@ -38,6 +39,9 @@ namespace Microsoft.Sarif.Viewer.ErrorList
                 }
             }
         }
+
+        /// <inheritdoc/>
+        public IEnumerable<SarifErrorListItem> SelectedItems => this.selectedItems;
 
         /// <inheritdoc/>
         public event EventHandler<SarifErrorListSelectionChangedEventArgs> SelectedItemChanged;
@@ -87,16 +91,22 @@ namespace Microsoft.Sarif.Viewer.ErrorList
             // Make sure there is only one selection, that's all we support.
             IEnumerator<ITableEntryHandle> enumerator = (this.errorListTableControl.SelectedEntries ?? Enumerable.Empty<ITableEntryHandle>()).GetEnumerator();
             ITableEntryHandle selectedTableEntry = null;
-            if (enumerator.MoveNext())
-            {
-                selectedTableEntry = enumerator.Current;
+            ICollection<SarifErrorListItem> selectedErrorListItems = null;
+            int itemCount = 0;
 
-                if (enumerator.MoveNext())
+            while (enumerator.MoveNext())
+            {
+                itemCount++;
+                ITableEntryHandle current = enumerator.Current;
+                selectedTableEntry ??= current;
+                if (this.TryGetSarifResult(current, out SarifErrorListItem sarifResult))
                 {
-                    selectedTableEntry = null;
+                    selectedErrorListItems ??= new List<SarifErrorListItem>();
+                    selectedErrorListItems.Add(sarifResult);
                 }
             }
 
+            selectedTableEntry = (itemCount > 1) ? null : selectedTableEntry;
             SarifErrorListItem selectedSarifErrorItem = null;
             if (selectedTableEntry != null)
             {
@@ -105,6 +115,7 @@ namespace Microsoft.Sarif.Viewer.ErrorList
 
             SarifErrorListItem previouslySelectedItem = this.currentlySelectedItem;
             this.currentlySelectedItem = selectedSarifErrorItem;
+            this.selectedItems = selectedErrorListItems;
 
             SelectedItemChanged?.Invoke(this, new SarifErrorListSelectionChangedEventArgs(previouslySelectedItem, this.currentlySelectedItem));
         }

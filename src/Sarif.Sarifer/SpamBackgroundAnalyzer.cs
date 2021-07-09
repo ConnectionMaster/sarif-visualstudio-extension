@@ -22,6 +22,11 @@ namespace Microsoft.CodeAnalysis.Sarif.Sarifer
         private string currentSolutionDirectory;
         private ISet<Skimmer<AnalyzeContext>> rules;
 
+        public SpamBackgroundAnalyzer()
+        {
+            this.fileSystem = FileSystem.Instance;
+        }
+
         /// <inheritdoc/>
         public override string ToolName => "Spam";
 
@@ -31,13 +36,30 @@ namespace Microsoft.CodeAnalysis.Sarif.Sarifer
         /// <inheritdoc/>
         public override string ToolSemanticVersion => "0.1.0";
 
-        public SpamBackgroundAnalyzer()
+        internal static ISet<Skimmer<AnalyzeContext>> LoadSearchDefinitionsFiles(IFileSystem fileSystem, string solutionDirectory)
         {
-            this.fileSystem = FileSystem.Instance;
+            string spamDirectory = Path.Combine(solutionDirectory, ".spam");
+            if (!fileSystem.DirectoryExists(spamDirectory))
+            {
+                return new HashSet<Skimmer<AnalyzeContext>>();
+            }
+
+            var definitionsPaths = new List<string>();
+            foreach (string definitionsPath in fileSystem.DirectoryEnumerateFiles(spamDirectory, "*.json", SearchOption.AllDirectories))
+            {
+                definitionsPaths.Add(definitionsPath);
+            }
+
+            return AnalyzeCommand.CreateSkimmersFromDefinitionsFiles(fileSystem, definitionsPaths);
         }
 
         protected override bool AnalyzeCore(Uri uri, string text, string solutionDirectory, SarifLogger sarifLogger, CancellationToken cancellationToken)
         {
+            if (!SariferOption.Instance.ShouldAnalyzeSarifFile && uri.GetFilePath().EndsWith(".sarif", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
             if (string.IsNullOrEmpty(solutionDirectory)
                 || (this.currentSolutionDirectory?.Equals(solutionDirectory, StringComparison.OrdinalIgnoreCase) != true))
             {
@@ -65,39 +87,27 @@ namespace Microsoft.CodeAnalysis.Sarif.Sarifer
             {
                 TargetUri = uri,
                 FileContents = text,
-                Logger = sarifLogger
+                Logger = sarifLogger,
             };
 
             using (context)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
+                // clear region cache make sure latest text is cached
+                FileRegionsCache.Instance.ClearCache();
+
                 // Filtering file before analyzing.
                 IEnumerable<Skimmer<AnalyzeContext>> applicableSkimmers = AnalyzeCommand.DetermineApplicabilityForTargetHelper(context, this.rules, disabledSkimmers);
 
-                Trace.WriteLine($"Rules filtered: {applicableSkimmers.Count()}");
+                Trace.WriteLine($"Applicable rules count: {applicableSkimmers.Count()}");
 
                 AnalyzeCommand.AnalyzeTargetHelper(context, applicableSkimmers, disabledSkimmers);
             }
 
+            Trace.WriteLine($"Analyzing {uri} completed.");
+
             return true;
-        }
-
-        internal static ISet<Skimmer<AnalyzeContext>> LoadSearchDefinitionsFiles(IFileSystem fileSystem, string solutionDirectory)
-        {
-            string spamDirectory = Path.Combine(solutionDirectory, ".spam");
-            if (!fileSystem.DirectoryExists(spamDirectory))
-            {
-                return new HashSet<Skimmer<AnalyzeContext>>();
-            }
-
-            var definitionsPaths = new List<string>();
-            foreach (string definitionsPath in fileSystem.DirectoryEnumerateFiles(spamDirectory, "*.json", SearchOption.AllDirectories))
-            {
-                definitionsPaths.Add(definitionsPath);
-            }
-
-            return AnalyzeCommand.CreateSkimmersFromDefinitionsFiles(fileSystem, definitionsPaths);
         }
     }
 }

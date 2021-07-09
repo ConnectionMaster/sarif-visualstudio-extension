@@ -3,11 +3,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Security;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -24,6 +24,7 @@ using Microsoft.CodeAnalysis.Sarif.VersionOne;
 using Microsoft.CodeAnalysis.Sarif.Visitors;
 using Microsoft.CodeAnalysis.Sarif.Writers;
 using Microsoft.Sarif.Viewer.Controls;
+using Microsoft.Sarif.Viewer.FileWatcher;
 using Microsoft.Sarif.Viewer.Models;
 using Microsoft.Sarif.Viewer.Sarif;
 using Microsoft.Sarif.Viewer.Tags;
@@ -43,6 +44,8 @@ namespace Microsoft.Sarif.Viewer.ErrorList
     public class ErrorListService
     {
         private const string VersionRegexPattern = @"""version""\s*:\s*""(?<version>[\d.]+)""";
+
+        private const string Sha256HashKey = "sha-256";
 
         private const int HeadSegmentLength = 200;
 
@@ -94,9 +97,14 @@ namespace Microsoft.Sarif.Viewer.ErrorList
             {
                 await ProcessLogFileCoreAsync(filePath, toolFormat, promptOnLogConversions, cleanErrors, openInEditor);
             }
-            catch (JsonReaderException)
+            catch (JsonException)
             {
                 RaiseLogProcessed(ExceptionalConditions.InvalidJson);
+            }
+            catch (Exception)
+            {
+                // for all other exceptions e.g. IO exception. throw it here will crash VS.
+                Trace.Write($"An error occurred while reading SARIF log file {filePath}");
             }
         }
 
@@ -109,10 +117,16 @@ namespace Microsoft.Sarif.Viewer.ErrorList
 
             if (toolFormat.MatchesToolFormat(ToolFormat.None))
             {
-                using (var logStreamReader = new StreamReader(filePath, Encoding.UTF8))
-                {
-                    logText = await logStreamReader.ReadToEndAsync().ConfigureAwait(continueOnCapturedContext: false);
-                }
+                await RetryInvokeAsync(
+                    async () =>
+                    {
+                        using (var logStreamReader = new StreamReader(filePath, Encoding.UTF8))
+                        {
+                            logText = await logStreamReader.ReadToEndAsync().ConfigureAwait(continueOnCapturedContext: false);
+                        }
+                    },
+                    retryInterval: TimeSpan.FromMilliseconds(300),
+                    maxAttemptCount: 5);
 
                 Match match = MatchVersionProperty(logText);
                 if (match.Success)
@@ -293,6 +307,8 @@ namespace Microsoft.Sarif.Viewer.ErrorList
 
                     CodeAnalysisResultManager.Instance.RunIndexToRunDataCache[cache.Key] = cache.Value;
                 }
+
+                SarifLogsMonitor.Instance.StopWatch(logFile);
             }
 
             foreach (int runIdToClear in runIdsToClear)
@@ -303,12 +319,61 @@ namespace Microsoft.Sarif.Viewer.ErrorList
             SarifLocationTagHelpers.RefreshTags();
         }
 
+        public static async Task CloseSarifLogItemsAsync(IEnumerable<string> logFiles)
+        {
+            if (!SarifViewerPackage.IsUnitTesting)
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            }
+
+            SarifTableDataSource.Instance.ClearErrorsForLogFiles(logFiles);
+
+            var runIdsToClear = new List<int>();
+
+            foreach (string logFile in logFiles)
+            {
+                // The null conditional operator in the Where clause is necessary because log files
+                // that come in through the API ILoadSarifLogService.LoadSarifLog(Stream) don't have
+                // a file name. The good news is, we never close such a log file. If in future we
+                // do need to close such a log file, we'll need to synthesize a log file name so we
+                // know which runs belong to that file.
+                runIdsToClear.AddRange(CodeAnalysisResultManager.Instance.RunIndexToRunDataCache.
+                    Where(runDataCacheKvp => runDataCacheKvp.Value.LogFilePath?.Equals(logFile, StringComparison.OrdinalIgnoreCase) == true).
+                    Select(runDataCacheKvp => runDataCacheKvp.Key));
+
+                if (CodeAnalysisResultManager.Instance.RunIndexToRunDataCache
+                    .Any(kvp => kvp.Value.SarifErrors
+                        .Any(error => error.FileName?.Equals(logFile, StringComparison.OrdinalIgnoreCase) == true)))
+                {
+                    KeyValuePair<int, RunDataCache> cache = CodeAnalysisResultManager.Instance.RunIndexToRunDataCache
+                        .First(kvp => kvp.Value.SarifErrors
+                            .Any(error => error.FileName?.Equals(logFile, StringComparison.OrdinalIgnoreCase) == true));
+                    SarifErrorListItem sarifError = cache.Value.SarifErrors.First(error => error.FileName?.Equals(logFile, StringComparison.OrdinalIgnoreCase) == true);
+                    cache.Value.SarifErrors.Remove(sarifError);
+
+                    CodeAnalysisResultManager.Instance.RunIndexToRunDataCache[cache.Key] = cache.Value;
+                }
+            }
+
+            foreach (int runIdToClear in runIdsToClear)
+            {
+                CodeAnalysisResultManager.Instance.RunIndexToRunDataCache.Remove(runIdToClear);
+            }
+        }
+
         /// <summary>
         /// Closes all SARIF logs opened in the viewer.
         /// </summary>
         public static void CloseAllSarifLogs()
         {
             CleanAllErrors();
+        }
+
+        public static bool IsSarifLogOpened(string logFile)
+        {
+            return SarifTableDataSource.Instance.HasErrorsFromLog(logFile) ||
+                CodeAnalysisResultManager.Instance.RunIndexToRunDataCache.
+                    Any(runDataCacheKvp => runDataCacheKvp.Value.LogFilePath?.Equals(logFile, StringComparison.OrdinalIgnoreCase) == true);
         }
 
         internal static Match MatchVersionProperty(string logText)
@@ -394,7 +459,7 @@ namespace Microsoft.Sarif.Viewer.ErrorList
             {
                 sarifLog = SarifLog.Load(stream);
             }
-            catch (JsonReaderException)
+            catch (JsonException)
             {
                 RaiseLogProcessed(ExceptionalConditions.InvalidJson);
             }
@@ -443,7 +508,7 @@ namespace Microsoft.Sarif.Viewer.ErrorList
                     };
                 }
 
-                if (Instance.WriteRunToErrorList(run, logFilePath) > 0)
+                if (Instance.WriteRunToErrorList(run, logFilePath, sarifLog) > 0)
                 {
                     hasResults = true;
                 }
@@ -462,6 +527,8 @@ namespace Microsoft.Sarif.Viewer.ErrorList
                     SdkUIUtilities.ShowToolWindowAsync(new Guid(ToolWindowGuids80.ErrorList), activate: false).FileAndForget(Constants.FileAndForgetFaultEventNames.ShowErrorList);
                 }
             }
+
+            SarifLogsMonitor.Instance.StartWatch(logFilePath);
 
             RaiseLogProcessed(ExceptionalConditionsCalculator.Calculate(sarifLog));
         }
@@ -491,12 +558,12 @@ namespace Microsoft.Sarif.Viewer.ErrorList
             }
         }
 
-        private int WriteRunToErrorList(Run run, string logFilePath)
+        private int WriteRunToErrorList(Run run, string logFilePath, SarifLog sarifLog)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
 
             int runIndex = CodeAnalysisResultManager.Instance.GetNextRunIndex();
-            var dataCache = new RunDataCache(runIndex, logFilePath);
+            var dataCache = new RunDataCache(runIndex, logFilePath, sarifLog);
             CodeAnalysisResultManager.Instance.RunIndexToRunDataCache.Add(runIndex, dataCache);
             CodeAnalysisResultManager.Instance.CacheUriBasePaths(run);
             var sarifErrors = new List<SarifErrorListItem>();
@@ -603,7 +670,7 @@ namespace Microsoft.Sarif.Viewer.ErrorList
                 artifact.Hashes = new Dictionary<string, string>();
             }
 
-            if (!artifact.Hashes.ContainsKey("sha-256"))
+            if (!artifact.Hashes.ContainsKey(Sha256HashKey))
             {
                 byte[] data = null;
                 if (artifact.Contents?.Binary != null)
@@ -617,17 +684,10 @@ namespace Microsoft.Sarif.Viewer.ErrorList
 
                 if (data != null)
                 {
-                    string hashString = this.GenerateHash(data);
-                    artifact.Hashes.Add("sha-256", hashString);
+                    string hashString = HashHelper.GenerateHash(data);
+                    artifact.Hashes.Add(Sha256HashKey, hashString);
                 }
             }
-        }
-
-        internal string GenerateHash(byte[] data)
-        {
-            var hashFunction = new SHA256Managed();
-            byte[] hash = hashFunction.ComputeHash(data);
-            return hash.Aggregate(string.Empty, (current, x) => current + $"{x:x2}");
         }
 
         private void StoreFileDetails(IList<Artifact> artifacts)
@@ -642,7 +702,8 @@ namespace Microsoft.Sarif.Viewer.ErrorList
                 Uri uri = file.Location?.Uri;
                 if (uri != null)
                 {
-                    if (file.Contents != null)
+                    // cache both artifact has file content and artifact has hash code
+                    if (file.Contents != null || (file.Hashes != null && file.Hashes.ContainsKey(Sha256HashKey)))
                     {
                         this.EnsureHashExists(file);
                         var fileDetails = new ArtifactDetailsModel(file);
@@ -657,12 +718,46 @@ namespace Microsoft.Sarif.Viewer.ErrorList
             LogProcessed?.Invoke(Instance, new LogProcessedEventArgs(conditions));
         }
 
-        private static void ErrorListService_LogProcessed(object sender, LogProcessedEventArgs e)
+        internal static void ErrorListService_LogProcessed(object sender, LogProcessedEventArgs e)
         {
             if (!SarifViewerPackage.IsUnitTesting)
             {
-                InfoBar.CreateInfoBarsForExceptionalConditionsAsync(e.ExceptionalConditions).FileAndForget(FileAndForgetEventName.InfoBarOpenFailure);
+                ThreadHelper.JoinableTaskFactory.Run(async () => await ShowInfoBarAsync(e.ExceptionalConditions));
             }
+        }
+
+        private static async Task ShowInfoBarAsync(ExceptionalConditions conditions)
+        {
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+            InfoBar.CreateInfoBarsForExceptionalConditionsAsync(conditions).FileAndForget(FileAndForgetEventName.InfoBarOpenFailure);
+
+            // After Sarif results loaded to Error List, make sure Viewer package is loaded
+            SarifViewerPackage.LoadViewerPackage();
+        }
+
+        private static async Task RetryInvokeAsync(Func<Task> func, TimeSpan retryInterval, int maxAttemptCount = 3)
+        {
+            var exceptions = new List<Exception>();
+            for (int attempted = 0; attempted < maxAttemptCount; attempted++)
+            {
+                try
+                {
+                    if (attempted > 0)
+                    {
+                        await Task.Delay(retryInterval);
+                    }
+
+                    await func();
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    exceptions.Add(ex);
+                }
+            }
+
+            throw new AggregateException(exceptions);
         }
     }
 }

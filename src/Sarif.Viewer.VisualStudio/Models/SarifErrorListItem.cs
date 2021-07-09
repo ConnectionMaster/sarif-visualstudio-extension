@@ -23,6 +23,8 @@ using Microsoft.VisualStudio.Text;
 using Microsoft.VisualStudio.Text.Adornments;
 using Microsoft.VisualStudio.Text.Tagging;
 
+using Newtonsoft.Json;
+
 using XamlDoc = System.Windows.Documents;
 
 namespace Microsoft.Sarif.Viewer
@@ -59,7 +61,7 @@ namespace Microsoft.Sarif.Viewer
         {
             this.Locations = new LocationCollection(string.Empty);
             this.RelatedLocations = new LocationCollection(string.Empty);
-            this.CallTrees = new CallTreeCollection();
+            this.AnalysisSteps = new AnalysisStepCollection();
             this.Stacks = new ObservableCollection<StackCollection>();
             this.Fixes = new ObservableCollection<FixModel>();
         }
@@ -79,12 +81,16 @@ namespace Microsoft.Sarif.Viewer
 
             this.RunIndex = runIndex;
             this.ResultId = Interlocked.Increment(ref currentResultId);
+            this.SarifResult = result;
             ReportingDescriptor rule = result.GetRule(run);
             this.Tool = run.Tool.ToToolModel();
             this.Rule = rule.ToRuleModel(result.RuleId);
             this.Invocation = run.Invocations?[0]?.ToInvocationModel();
-            this.Message = result.GetMessageText(rule, concise: false).Trim();
-            this.ShortMessage = result.GetMessageText(rule, concise: true).Trim();
+            this.WorkingDirectory = Path.Combine(Path.GetTempPath(), this.RunIndex.ToString());
+            this.HelpLink = this.Rule?.HelpUri;
+
+            this.RawMessage = result.GetMessageText(rule);
+            (this.ShortMessage, this.Message) = this.SplitMessageText(RawMessage);
             if (!this.Message.EndsWith("."))
             {
                 this.ShortMessage = this.ShortMessage.TrimEnd('.');
@@ -105,11 +111,6 @@ namespace Microsoft.Sarif.Viewer
                 this.LineNumber = this.Region.StartLine;
                 this.ColumnNumber = this.Region.StartColumn;
             }
-
-            this.Tool = run.Tool.ToToolModel();
-            this.Rule = rule.ToRuleModel(result.RuleId);
-            this.Invocation = run.Invocations?[0]?.ToInvocationModel();
-            this.WorkingDirectory = Path.Combine(Path.GetTempPath(), this.RunIndex.ToString());
 
             if (result.Locations?.Any() == true)
             {
@@ -132,15 +133,15 @@ namespace Microsoft.Sarif.Viewer
             {
                 foreach (CodeFlow codeFlow in result.CodeFlows)
                 {
-                    var callTree = codeFlow.ToCallTree(run, resultId: this.ResultId, runIndex: this.RunIndex);
-                    if (callTree != null)
+                    var analysisStep = codeFlow.ToAnalysisStep(run, resultId: this.ResultId, runIndex: this.RunIndex);
+                    if (analysisStep != null)
                     {
-                        this.CallTrees.Add(callTree);
+                        this.AnalysisSteps.Add(analysisStep);
                     }
                 }
 
-                this.CallTrees.Verbosity = 100;
-                this.CallTrees.IntelligentExpand();
+                this.AnalysisSteps.Verbosity = 100;
+                this.AnalysisSteps.IntelligentExpand();
             }
 
             if (result.Stacks != null)
@@ -153,16 +154,9 @@ namespace Microsoft.Sarif.Viewer
 
             if (result.Fixes != null)
             {
-                IDictionary<int, RunDataCache> runIndexToRunDataCache = CodeAnalysisResultManager.Instance.RunIndexToRunDataCache;
-                if (!runIndexToRunDataCache.TryGetValue(this.RunIndex, out RunDataCache runDataCache))
-                {
-                    runDataCache = null;
-                }
-
-                FileRegionsCache regionsCache = runDataCache?.FileRegionsCache;
                 foreach (Fix fix in result.Fixes)
                 {
-                    var fixModel = fix.ToFixModel(run.OriginalUriBaseIds, regionsCache);
+                    var fixModel = fix.ToFixModel(run.OriginalUriBaseIds, FileRegionsCache.Instance);
                     this.Fixes.Add(fixModel);
                 }
             }
@@ -214,8 +208,8 @@ namespace Microsoft.Sarif.Viewer
             }
 
             run.TryGetRule(ruleId, out ReportingDescriptor rule);
-            this.Message = notification.Message.Text?.Trim() ?? string.Empty;
-            this.ShortMessage = ExtensionMethods.GetFirstSentence(this.Message);
+            this.RawMessage = notification.Message.Text?.Trim() ?? string.Empty;
+            (this.ShortMessage, this.Message) = this.SplitMessageText(this.RawMessage);
 
             // This is not locale friendly.
             if (!this.Message.EndsWith("."))
@@ -233,6 +227,7 @@ namespace Microsoft.Sarif.Viewer
             this.Rule = rule.ToRuleModel(ruleId);
             this.Invocation = run.Invocations?[0]?.ToInvocationModel();
             this.WorkingDirectory = Path.Combine(Path.GetTempPath(), this.RunIndex.ToString());
+            this.HelpLink = this.Rule?.HelpUri;
         }
 
         /// <summary>
@@ -244,7 +239,12 @@ namespace Microsoft.Sarif.Viewer
         /// </remarks>
         public int ResultId { get; }
 
-        private int RunIndex { get; }
+        /// <summary>
+        /// Gets reference to corresponding <see cref="SarifLog.Result" /> object.
+        /// </summary>
+        public Result SarifResult { get; }
+
+        public int RunIndex { get; }
 
         [Browsable(false)]
         public string MimeType { get; set; }
@@ -255,10 +255,7 @@ namespace Microsoft.Sarif.Viewer
         [Browsable(false)]
         public string FileName
         {
-            get
-            {
-                return this._fileName;
-            }
+            get => this._fileName;
 
             set
             {
@@ -284,8 +281,16 @@ namespace Microsoft.Sarif.Viewer
         public string Message { get; set; }
 
         [Browsable(false)]
+        public string RawMessage { get; set; }
+
+        [Browsable(false)]
+        public string PlainMessage => !string.IsNullOrWhiteSpace(this.RawMessage) && this.HasEmbeddedLinks ?
+                                      SdkUIUtilities.GetPlainText(this.MessageInlines) :
+                                      this.RawMessage;
+
+        [Browsable(false)]
         public ObservableCollection<XamlDoc.Inline> MessageInlines => this._messageInlines
-            ?? (this._messageInlines = new ObservableCollection<XamlDoc.Inline>(SdkUIUtilities.GetInlinesForErrorMessage(this.Message)));
+            ?? (this._messageInlines = new ObservableCollection<XamlDoc.Inline>(SdkUIUtilities.GetInlinesForErrorMessage(this.RawMessage)));
 
         [Browsable(false)]
         public bool HasEmbeddedLinks => this.MessageInlines.Any();
@@ -324,10 +329,7 @@ namespace Microsoft.Sarif.Viewer
         [Browsable(false)]
         public ToolModel Tool
         {
-            get
-            {
-                return this._tool;
-            }
+            get => this._tool;
 
             set
             {
@@ -339,10 +341,7 @@ namespace Microsoft.Sarif.Viewer
         [Browsable(false)]
         public RuleModel Rule
         {
-            get
-            {
-                return this._rule;
-            }
+            get => this._rule;
 
             set
             {
@@ -354,10 +353,7 @@ namespace Microsoft.Sarif.Viewer
         [Browsable(false)]
         public InvocationModel Invocation
         {
-            get
-            {
-                return this._invocation;
-            }
+            get => this._invocation;
 
             set
             {
@@ -369,10 +365,7 @@ namespace Microsoft.Sarif.Viewer
         [Browsable(false)]
         public string SelectedTab
         {
-            get
-            {
-                return this._selectedTab;
-            }
+            get => this._selectedTab;
 
             set
             {
@@ -391,7 +384,7 @@ namespace Microsoft.Sarif.Viewer
         public LocationCollection RelatedLocations { get; }
 
         [Browsable(false)]
-        public CallTreeCollection CallTrees { get; }
+        public AnalysisStepCollection AnalysisSteps { get; }
 
         [Browsable(false)]
         public ObservableCollection<StackCollection> Stacks { get; }
@@ -400,7 +393,7 @@ namespace Microsoft.Sarif.Viewer
         public ObservableCollection<FixModel> Fixes { get; }
 
         [Browsable(false)]
-        public bool HasDetails => this.Locations.Any() || this.RelatedLocations.Any() || this.CallTrees.Any() || this.Stacks.Any() || this.Fixes.Any();
+        public bool HasDetails => this.Locations.Any() || this.RelatedLocations.Any() || this.AnalysisSteps.Any() || this.Stacks.Any() || this.Fixes.Any();
 
         [Browsable(false)]
         public int LocationsCount => this.Locations.Count + this.RelatedLocations.Count;
@@ -409,7 +402,7 @@ namespace Microsoft.Sarif.Viewer
         public bool HasMultipleLocations => this.LocationsCount > 1;
 
         [Browsable(false)]
-        public DelegateCommand OpenLogFileCommand => this._openLogFileCommand ?? (this._openLogFileCommand = new DelegateCommand(() =>
+        public DelegateCommand OpenLogFileCommand => this._openLogFileCommand ??= new DelegateCommand(() =>
         {
             // For now this is being done on the UI thread
             // and is only required due to the message box being shown below.
@@ -418,7 +411,7 @@ namespace Microsoft.Sarif.Viewer
             ThreadHelper.ThrowIfNotOnUIThread();
 
             this.OpenLogFile();
-        }));
+        });
 
         internal void OpenLogFile()
         {
@@ -435,9 +428,34 @@ namespace Microsoft.Sarif.Viewer
                     var dte = AsyncPackage.GetGlobalService(typeof(DTE)) as DTE2;
                     dte.ExecuteCommand("File.OpenFile", $@"""{this.LogFilePath}"" /e:""JSON Editor""");
                 }
+                else if (CodeAnalysisResultManager.Instance.RunIndexToRunDataCache.TryGetValue(this.RunIndex, out RunDataCache cache))
+                {
+                    // LogFilePath doesn't exist then its a background analyzer result in memeory
+                    // load sarif log from memory cache
+                    string sarifLogFilePath = Path.Combine(CodeAnalysisResultManager.Instance.TempDirectoryPath, $"{cache.SarifLog.GetHashCode()}");
+                    if (!Directory.Exists(CodeAnalysisResultManager.Instance.TempDirectoryPath))
+                    {
+                        Directory.CreateDirectory(CodeAnalysisResultManager.Instance.TempDirectoryPath);
+                    }
+
+                    if (!File.Exists(sarifLogFilePath))
+                    {
+                        // serialize memory cached SarifLog into a temp file
+                        var serializer = new JsonSerializer
+                        {
+                            Formatting = Formatting.Indented,
+                        };
+                        using var sw = new StreamWriter(sarifLogFilePath);
+                        using JsonWriter writer = new JsonTextWriter(sw);
+                        serializer.Serialize(writer, cache.SarifLog);
+                    }
+
+                    // open temp sarif log file
+                    SdkUIUtilities.OpenDocument(ServiceProvider.GlobalProvider, sarifLogFilePath, usePreviewPane: false);
+                }
                 else
                 {
-                    VsShellUtilities.ShowMessageBox(Microsoft.VisualStudio.Shell.ServiceProvider.GlobalProvider,
+                    VsShellUtilities.ShowMessageBox(ServiceProvider.GlobalProvider,
                                                     string.Format(Resources.OpenLogFileFail_DialogMessage, this.LogFilePath),
                                                     null, // title
                                                     OLEMSGICON.OLEMSGICON_CRITICAL,
@@ -470,17 +488,14 @@ namespace Microsoft.Sarif.Viewer
                         nonHighlightedColor: ResultTextMarker.DEFAULT_SELECTION_COLOR,
                         highlightedColor: ResultTextMarker.HOVER_SELECTION_COLOR,
                         errorType: predefinedErrorType,
-                        tooltipContent: this.Message,
+                        tooltipContent: this.PlainMessage,
                         context: this);
                 }
 
                 return this._lineMarker;
             }
 
-            set
-            {
-                this._lineMarker = value;
-            }
+            set => this._lineMarker = value;
         }
 
         internal void RemapFilePath(string originalPath, string remappedPath)
@@ -513,18 +528,18 @@ namespace Microsoft.Sarif.Viewer
                 }
             }
 
-            foreach (CallTree callTree in this.CallTrees)
+            foreach (AnalysisStep analysisStep in this.AnalysisSteps)
             {
-                var nodesToProcess = new Stack<CallTreeNode>();
+                var nodesToProcess = new Stack<AnalysisStepNode>();
 
-                foreach (CallTreeNode topLevelNode in callTree.TopLevelNodes)
+                foreach (AnalysisStepNode topLevelNode in analysisStep.TopLevelNodes)
                 {
                     nodesToProcess.Push(topLevelNode);
                 }
 
                 while (nodesToProcess.Count > 0)
                 {
-                    CallTreeNode current = nodesToProcess.Pop();
+                    AnalysisStepNode current = nodesToProcess.Pop();
                     try
                     {
                         if (current.FilePath?.Equals(originalPath, StringComparison.OrdinalIgnoreCase) == true)
@@ -540,7 +555,7 @@ namespace Microsoft.Sarif.Viewer
                         // Just move on with processing the child nodes.
                     }
 
-                    foreach (CallTreeNode childNode in current.Children)
+                    foreach (AnalysisStepNode childNode in current.Children)
                     {
                         nodesToProcess.Push(childNode);
                     }
@@ -646,29 +661,29 @@ namespace Microsoft.Sarif.Viewer
                 resultTextMarkers = resultTextMarkers.Concat(this.Locations.Select(location => location.LineMarker));
                 resultTextMarkers = resultTextMarkers.Concat(this.RelatedLocations.Select(relatedLocation => relatedLocation.LineMarker));
 
-                foreach (CallTree callTree in this.CallTrees)
+                foreach (AnalysisStep analysisStep in this.AnalysisSteps)
                 {
-                    var nodesToProcess = new Stack<CallTreeNode>();
-                    var allCallTreeNodes = new List<CallTreeNode>();
+                    var nodesToProcess = new Stack<AnalysisStepNode>();
+                    var allAnalysisStepNodes = new List<AnalysisStepNode>();
 
-                    foreach (CallTreeNode topLevelNode in callTree.TopLevelNodes)
+                    foreach (AnalysisStepNode topLevelNode in analysisStep.TopLevelNodes)
                     {
                         nodesToProcess.Push(topLevelNode);
                     }
 
                     while (nodesToProcess.Count > 0)
                     {
-                        CallTreeNode current = nodesToProcess.Pop();
+                        AnalysisStepNode current = nodesToProcess.Pop();
 
-                        allCallTreeNodes.Add(current);
+                        allAnalysisStepNodes.Add(current);
 
-                        foreach (CallTreeNode childNode in current.Children)
+                        foreach (AnalysisStepNode childNode in current.Children)
                         {
                             nodesToProcess.Push(childNode);
                         }
                     }
 
-                    resultTextMarkers = resultTextMarkers.Concat(allCallTreeNodes.Select(callTreeNode => callTreeNode.LineMarker));
+                    resultTextMarkers = resultTextMarkers.Concat(allAnalysisStepNodes.Select(analysisStepNode => analysisStepNode.LineMarker));
                 }
 
                 foreach (StackCollection stackCollection in this.Stacks)
@@ -682,7 +697,7 @@ namespace Microsoft.Sarif.Viewer
             return resultTextMarkers.Where(resultTextMarker => resultTextMarker != null);
         }
 
-        public IEnumerable<string> GetCodeSnippets()
+        internal IEnumerable<string> GetCodeSnippets()
         {
             IDictionary<int, RunDataCache> runIndexToRunDataCache = CodeAnalysisResultManager.Instance.RunIndexToRunDataCache;
             if (!runIndexToRunDataCache.TryGetValue(this.RunIndex, out RunDataCache runDataCache))
@@ -692,6 +707,36 @@ namespace Microsoft.Sarif.Viewer
 
             FileRegionsCache regionsCache = runDataCache?.FileRegionsCache;
             return this.Locations.Select(location => location.ExtractSnippet(regionsCache));
+        }
+
+        internal (string first, string second) SplitMessageText(string fullText, int maxLength = 165)
+        {
+            // remove line breakers
+            fullText = fullText.Replace(Environment.NewLine, " ").Replace("\r", " ").Replace("\n", " ");
+
+            string text = fullText;
+            string restText = fullText;
+
+            char[] endChars = new char[] { '\r', '\n', ' ', };
+            if (text.Length > maxLength)
+            {
+                int endPosition = maxLength;
+
+                // if need to split text longer than maxLength, make sure not split in middle of a word.
+                if (!endChars.Contains(text[maxLength]))
+                {
+                    // find nearest whitespace before max length to separate the string
+                    endPosition = text.LastIndexOfAny(endChars, maxLength);
+
+                    // if not found, set end position to max length
+                    endPosition = (endPosition == -1) ? maxLength : endPosition;
+                }
+
+                text = text.Substring(0, endPosition) + " \u2026"; // u2026 is Unicode "horizontal ellipsis";
+                restText = restText.Substring(endPosition).TrimStart(endChars);
+            }
+
+            return (text.TrimEnd(endChars), restText.TrimEnd(endChars));
         }
     }
 }

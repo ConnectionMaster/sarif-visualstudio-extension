@@ -132,7 +132,7 @@
   <data name="ConfirmDownloadDialog_Title" xml:space="preserve">
     <value>Confirm Download</value>
   </data>
-  <data name="ContinuingCallTreeNodeMessage" xml:space="preserve">
+  <data name="ContinuingAnalysisStepNodeMessage" xml:space="preserve">
     <value>Continuing</value>
   </data>
   <data name="ConvertNonSarifLog_DialogMessage" xml:space="preserve">
@@ -330,19 +330,19 @@
     <value>Report "{0}" Result</value>
   </data>
   <data name="FalsePositiveSummary" xml:space="preserve">
-    <value>{0} rule "{1}" wasn't useful because it didn't flag an actual problem (i.e., it is a false positive).</value>
+    <value>The result wasn't useful because it didn't flag an actual problem (i.e., it is a false positive).</value>
   </data>
   <data name="LowValueSummary" xml:space="preserve">
-    <value>{0} rule "{1}" was accurate but not useful because the code improvement to resolve is relatively low value.</value>
+    <value>The result was accurate but not useful because the code improvement to resolve is relatively low value.</value>
   </data>
   <data name="NonActionableSummary" xml:space="preserve">
-    <value>{0} rule "{1}" wasn't useful because the information provided for it wasn't actionable (couldn't be understood or was incomplete).</value>
+    <value>The result wasn't useful because the information provided for it wasn't actionable (couldn't be understood or was incomplete).</value>
   </data>
   <data name="NonShippingCodeSummary" xml:space="preserve">
-    <value>{0} rule "{1}" wasn't useful because it was reported against non-shipping code.</value>
+    <value>The result wasn't useful because it was reported against non-shipping code.</value>
   </data>
   <data name="OtherSummary" xml:space="preserve">
-    <value>{0} rule "{1}" wasn't useful</value>
+    <value>The result wasn't useful</value>
   </data>
   <data name="SendFeedbackFailed" xml:space="preserve">
     <value>An error occurred sending your feedback</value>
@@ -352,5 +352,35 @@
   </data>
   <data name="PromptForResolvedPathDialogTitle" xml:space="preserve">
     <value>Locate missing file: {0}</value>
+  </data>
+  <data name="OpenExternalUri_DialogMessage" xml:space="preserve">
+    <value>Do you want to open the external website? {0}</value>
+  </data>
+  <data name="OpenExternalUri_DialogTitle" xml:space="preserve">
+    <value>Open Hyperlink</value>
+  </data>
+  <data name="ConfirmSourceFileDialog_BrowseFileButton" xml:space="preserve">
+    <value>Browse to Another Location…</value>
+  </data>
+  <data name="ConfirmSourceFileDialog_Message" xml:space="preserve">
+    <value>This SARIF log has embedded source code for this analysis result that we can show. We also found a file in your solution/enlistment that matches the relevant file path, but it isn’t the same version of the file that was scanned when the log file was produced. What would you like to do?</value>
+  </data>
+  <data name="ConfirmSourceFileDialog_Message_NoEmbedded" xml:space="preserve">
+    <value>We found a file in your solution/enlistment that matches the file path for this result, but the file isn’t the same version that was scanned when the log file was produced. What would you like to do?</value>
+  </data>
+  <data name="ConfirmSourceFileDialog_OpenFileButton" xml:space="preserve">
+    <value>Open Local File</value>
+  </data>
+  <data name="ConfirmSourceFileDialog_Title" xml:space="preserve">
+    <value>Confirm Source File Location</value>
+  </data>
+  <data name="ConfirmSourceFileDialog_ViewEmbeddedFileButton" xml:space="preserve">
+    <value>Show Embedded File Content</value>
+  </data>
+  <data name="ConfirmSourceFileDialog_RememberMyChoice" xml:space="preserve">
+    <value>Remember my choice for other results from same SARIF log.</value>
+  </data>
+  <data name="ImportHdfFilter" xml:space="preserve">
+    <value>Heimdall Data Format log file (*.json)|*.json</value>
   </data>
 </root>

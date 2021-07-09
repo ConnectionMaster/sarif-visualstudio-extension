@@ -53,6 +53,18 @@ namespace Microsoft.CodeAnalysis.Sarif.Sarifer
         /// <summary>
         /// Clear all results.
         /// </summary>
+        /// <returns>
+        /// A <see cref="Task"/> that represents the completion of the cleared results.
+        /// </returns>
         Task ClearResultsAsync();
+
+        /// <summary>
+        /// Clear results of specified logId.
+        /// </summary>
+        /// <param name="logId">logId of set of results.</param>
+        /// <returns>
+        /// A <see cref="Task"/> that represents the completion of the cleared results.
+        /// </returns>
+        Task CloseResultsAsync(string logId);
     }
 }

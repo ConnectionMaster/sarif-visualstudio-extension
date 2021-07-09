@@ -85,8 +85,8 @@ namespace Microsoft.Sarif.Viewer.ErrorList
             // i.e. if we pass 5, the error list will display 6.
             // Subtract one from the line number so the error list displays the correct value.
             this.columnKeyToContent[StandardTableKeyNames.Line] = this.Error.LineNumber - 1;
+            this.columnKeyToContent[StandardTableKeyNames.Column] = this.Error.ColumnNumber - 1;
 
-            this.columnKeyToContent[StandardTableKeyNames.Column] = this.Error.ColumnNumber;
             this.columnKeyToContent[StandardTableKeyNames.ErrorSeverity] = GetSeverity(this.Error.Level);
             this.columnKeyToContent[StandardTableKeyNames.Priority] = GetSeverity(this.Error.Level) == __VSERRORCATEGORY.EC_ERROR
                     ? vsTaskPriority.vsTaskPriorityHigh
@@ -110,7 +110,7 @@ namespace Microsoft.Sarif.Viewer.ErrorList
             // it when it's asked for.
             this.columnKeyToContent[StandardTableKeyNames2.TextInlines] = new Lazy<object>(() =>
             {
-                string message = this.Error.Message;
+                string message = this.Error.RawMessage;
                 List<Inline> inlines = SdkUIUtilities.GetMessageInlines(message, this.ErrorListInlineLink_Click);
 
                 if (inlines.Count > 0)
@@ -238,13 +238,19 @@ namespace Microsoft.Sarif.Viewer.ErrorList
             // This is super dangerous! We are launching URIs for SARIF logs
             // that can point to anything.
             // https://github.com/microsoft/sarif-visualstudio-extension/issues/171
-            else if (hyperLink.Tag is string uriAsString)
+            else
             {
-                System.Diagnostics.Process.Start(uriAsString);
-            }
-            else if (hyperLink.Tag is Uri uri)
-            {
-                System.Diagnostics.Process.Start(uri.ToString());
+                string uriString = null;
+                if (hyperLink.Tag is string uriAsString)
+                {
+                    uriString = uriAsString;
+                }
+                else if (hyperLink.Tag is Uri uri)
+                {
+                    uriString = uri.ToString();
+                }
+
+                SdkUIUtilities.OpenExternalUrl(uriString);
             }
         }
 

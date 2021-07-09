@@ -4,7 +4,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
 
@@ -19,12 +18,15 @@ namespace Microsoft.Sarif.Viewer.Interop
         /// Gets the unique identifier of the SARIF Viewer package.
         /// </summary>
         public static readonly Guid ViewerExtensionGuid = new Guid("b97edb99-282e-444c-8f53-7de237f2ec5e");
+        public static readonly Guid SariferExtensionGuid = new Guid("F70132AB-4095-477F-AAD2-81D3D581113B");
 
         private const string ViewerAssemblyFileName = "Microsoft.Sarif.Viewer";
         private const string ViewerLoadServiceInterfaceName = "SLoadSarifLogService";
         private const string ViewerCloseServiceInterfaceName = "SCloseSarifLogService";
         private bool? _isViewerExtensionInstalled;
         private bool? _isViewerExtensionLoaded;
+        private bool? _isSariferExtensionInstalled;
+        private bool? _isSariferExtensionLoaded;
         private Assembly _viewerExtensionAssembly;
         private AssemblyName _viewerExtensionAssemblyName;
         private Version _viewerExtensionVersion;
@@ -52,7 +54,7 @@ namespace Microsoft.Sarif.Viewer.Interop
             {
                 ThreadHelper.ThrowIfNotOnUIThread();
 
-                return this._isViewerExtensionInstalled ?? (bool)(this._isViewerExtensionInstalled = this.IsExtensionInstalled());
+                return this._isViewerExtensionInstalled ?? (bool)(this._isViewerExtensionInstalled = this.IsExtensionInstalled(ViewerExtensionGuid));
             }
         }
 
@@ -65,7 +67,33 @@ namespace Microsoft.Sarif.Viewer.Interop
             {
                 ThreadHelper.ThrowIfNotOnUIThread();
 
-                return this._isViewerExtensionLoaded ?? (bool)(this._isViewerExtensionLoaded = this.IsExtensionLoaded());
+                return this._isViewerExtensionLoaded ?? (bool)(this._isViewerExtensionLoaded = this.IsExtensionLoaded(ViewerExtensionGuid));
+            }
+        }
+
+        /// <summary>
+        /// Gets a value indicating whether the Sarifer extension is installed.
+        /// </summary>
+        public bool IsSariferExtensionInstalled
+        {
+            get
+            {
+                ThreadHelper.ThrowIfNotOnUIThread();
+
+                return this._isSariferExtensionInstalled ?? (bool)(this._isSariferExtensionInstalled = this.IsExtensionInstalled(SariferExtensionGuid));
+            }
+        }
+
+        /// <summary>
+        /// Gets a value indicating whether the Sarifer extension is loaded.
+        /// </summary>
+        public bool IsSariferExtensionLoaded
+        {
+            get
+            {
+                ThreadHelper.ThrowIfNotOnUIThread();
+
+                return this._isSariferExtensionLoaded ?? (bool)(this._isSariferExtensionLoaded = this.IsExtensionLoaded(SariferExtensionGuid));
             }
         }
 
@@ -227,6 +255,25 @@ namespace Microsoft.Sarif.Viewer.Interop
             return package;
         }
 
+        /// <summary>
+        /// Loads the SARIF Sarifer extension.
+        /// </summary>
+        /// <returns>The extension package that has been loaded.</returns>
+        public IVsPackage LoadSariferExtension()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+
+            Guid serviceGuid = SariferExtensionGuid;
+            IVsPackage package = null;
+
+            if (this.IsSariferExtensionInstalled)
+            {
+                this.VsShell.LoadPackage(ref serviceGuid, out package);
+            }
+
+            return package;
+        }
+
         private async Task<bool> CallServiceApiAsync(string serviceInterfaceName, Func<dynamic, bool> action)
         {
             if (!this.IsViewerExtensionInstalled || (this.IsViewerExtensionLoaded && this.LoadViewerExtension() == null))
@@ -256,21 +303,21 @@ namespace Microsoft.Sarif.Viewer.Interop
             return action(serviceInterface);
         }
 
-        private bool IsExtensionInstalled()
+        private bool IsExtensionInstalled(Guid extensionGuid)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
 
-            Guid serviceGuid = ViewerExtensionGuid;
+            Guid serviceGuid = extensionGuid;
             int result;
 
             return this.VsShell.IsPackageInstalled(ref serviceGuid, out result) == 0 && result == 1;
         }
 
-        private bool IsExtensionLoaded()
+        private bool IsExtensionLoaded(Guid extensionGuid)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
 
-            Guid serviceGuid = ViewerExtensionGuid;
+            Guid serviceGuid = extensionGuid;
             IVsPackage package;
 
             return this.VsShell.IsPackageLoaded(ref serviceGuid, out package) == 0 && package != null;

@@ -3,12 +3,15 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 using FluentAssertions;
 
 using Microsoft.CodeAnalysis.Sarif;
 
 using Xunit;
+
+using XamlDoc = System.Windows.Documents;
 
 namespace Microsoft.Sarif.Viewer.VisualStudio.UnitTests
 {
@@ -359,8 +362,10 @@ namespace Microsoft.Sarif.Viewer.VisualStudio.UnitTests
             };
 
             SarifErrorListItem item = MakeErrorListItem(result);
+
+            // with the change related to #360, message is not separated by sentence.
             item.Message.Should().Be($"{s1} {s2}");
-            item.ShortMessage.Should().Be(s1);
+            item.ShortMessage.Should().Be($"{s1} {s2}");
         }
 
         [Fact]
@@ -381,6 +386,107 @@ namespace Microsoft.Sarif.Viewer.VisualStudio.UnitTests
         }
 
         [Fact]
+        public void SarifErrorListItem_ResultMessageFormat_LongTextWithoutBreak()
+        {
+            // very long text without break like space or NewLine, longer than default max lengh 165
+            const string s1 = "1234567890";
+            var result = new Result
+            {
+                Message = new Message()
+                {
+                    Text = string.Concat(Enumerable.Repeat(s1, 20)), // replace s1 10 times, a string which length is 200
+                },
+            };
+
+            SarifErrorListItem item = MakeErrorListItem(result);
+            int breakPoistion = 165;
+            item.ShortMessage.Length.Should().Be(breakPoistion + 2);
+            item.Message.Length.Should().Be(200 - breakPoistion);
+        }
+
+        [Fact]
+        public void SarifErrorListItem_ResultMessageFormat_LongTextSplitAtSpace()
+        {
+            // a string that index at Max Length (165) happens to be a space
+            const string s1 = "In httplib2 before version 0.18.0, an attacker controlling unescaped part of uri for `httplib2.Http.request()` could change request headers and body, send additional hidden requests to same server. This vulnerability impacts software that uses httplib2 with uri constructed by string concatenation, as opposed to proper urllib building with escaping. This has been fixed in 0.18.0.";
+            var result = new Result
+            {
+                Message = new Message()
+                {
+                    Text = s1,
+                },
+            };
+
+            SarifErrorListItem item = MakeErrorListItem(result);
+            int breakPoistion = 165; // 0 indexed
+            item.ShortMessage.Length.Should().Be(breakPoistion + 2); // 2 chars is added at end " \u2026"
+            item.ShortMessage.Substring(0, breakPoistion).Should().Be(s1.Substring(0, breakPoistion));
+            item.Message.Length.Should().Be(s1.Length - breakPoistion - 1);
+            item.Message.Should().Be(s1.Substring(breakPoistion + 1)); // leading space trimmed
+        }
+
+        [Fact]
+        public void SarifErrorListItem_ResultMessageFormat_LongTextWitBreak()
+        {
+            // very long text has a space every 10 chars 
+            const string s1 = "123456789 ";
+            var result = new Result
+            {
+                Message = new Message()
+                {
+                    Text = string.Concat(Enumerable.Repeat(s1, 20)), // replace s1 10 times, a string which length is 200
+                },
+            };
+
+            SarifErrorListItem item = MakeErrorListItem(result);
+            int breakPoistion = 159; // 0 indexed
+            item.ShortMessage.Length.Should().Be(breakPoistion + 2); // the space break the text will be removed
+            item.Message.Length.Should().Be(200 - breakPoistion - 2); // last space is trimmed
+        }
+
+        [Fact]
+        public void SarifErrorListItem_ResultMessageFormat_TextWitLinerBreak()
+        {
+            const string s0 = "The quick brown fox. Jumps over the lazy dog.";
+            // text with varies style of line breakers 
+            string s1 = "The\rquick brown fox." + Environment.NewLine + "Jumps over the lazy\ndog.";
+            var result = new Result
+            {
+                Message = new Message()
+                {
+                    Text = s1,
+                },
+            };
+
+            SarifErrorListItem item = MakeErrorListItem(result);
+            item.Message.Should().Be(s0);
+            item.ShortMessage.Should().Be(s0);
+        }
+
+        [Fact]
+        public void SarifErrorListItem_HasLongEmbeddedLink()
+        {
+            const string s1 = "The quick brown fox. Jumps over the lazy dog. Reference to [docs](https://github.com/long/path/to/docs/1234567890/1234567890/1234567890/1234567890/1234567890/1234567890/1234567890/)";
+            var result = new Result
+            {
+                Message = new Message()
+                {
+                    Text = s1,
+                },
+            };
+
+            SarifErrorListItem item = MakeErrorListItem(result);
+            item.HasEmbeddedLinks.Should().BeTrue();
+
+            // "The quick brown fox. Jumps over the lazy dog. Reference to ", "docs"
+            item.MessageInlines.Count.Should().Be(2);
+            item.MessageInlines[0].ContentStart.GetTextInRun(XamlDoc.LogicalDirection.Forward)
+                .Should().BeEquivalentTo("The quick brown fox. Jumps over the lazy dog. Reference to ");
+            item.MessageInlines[1].ContentStart.GetTextInRun(XamlDoc.LogicalDirection.Forward)
+                .Should().BeEquivalentTo("docs");
+        }
+
+        [Fact]
         public void SarifErrorListItem_HasEmbeddedLinks_MultipleSentencesWithEmbeddedLinks()
         {
             const string s1 = "The quick [brown](1) fox.";
@@ -395,6 +501,73 @@ namespace Microsoft.Sarif.Viewer.VisualStudio.UnitTests
 
             SarifErrorListItem item = MakeErrorListItem(result);
             item.HasEmbeddedLinks.Should().BeTrue();
+
+            // "The quick ", "brown", " fox. Jumps over the ", "lazy", " dog."
+            item.MessageInlines.Count.Should().Be(5);
+            item.MessageInlines[0].ContentStart.GetTextInRun(XamlDoc.LogicalDirection.Forward).Should().BeEquivalentTo("The quick ");
+            item.MessageInlines[1].ContentStart.GetTextInRun(XamlDoc.LogicalDirection.Forward).Should().BeEquivalentTo("brown");
+            item.MessageInlines[2].ContentStart.GetTextInRun(XamlDoc.LogicalDirection.Forward).Should().BeEquivalentTo(" fox. Jumps over the ");
+            item.MessageInlines[3].ContentStart.GetTextInRun(XamlDoc.LogicalDirection.Forward).Should().BeEquivalentTo("lazy");
+            item.MessageInlines[4].ContentStart.GetTextInRun(XamlDoc.LogicalDirection.Forward).Should().BeEquivalentTo(" dog.");
+
+        }
+
+        [Fact]
+        public void SarifErrorListItem_HelpLinkShouldBeSameAs_RuleHelpUri()
+        {
+            string link = "https://example.com/TST0001";
+            var result = new Result
+            {
+                Message = new Message
+                {
+                    Text = "The quick brown fox.",
+                },
+                RuleId = "TST0001",
+            };
+
+            var run = new Run
+            {
+                Tool = new Tool
+                {
+                    Driver = new ToolComponent
+                    {
+                        Rules = new List<ReportingDescriptor>
+                        {
+                            new ReportingDescriptor
+                            {
+                                Id = "TST0001",
+                                HelpUri = new Uri(link),
+                            },
+                        },
+                    },
+                },
+            };
+
+            SarifErrorListItem item = MakeErrorListItem(run, result);
+
+            item.HelpLink.Should().NotBeNull();
+            item.HelpLink.Should().BeEquivalentTo(link);
+
+            // without help Uri
+            run = new Run
+            {
+                Tool = new Tool
+                {
+                    Driver = new ToolComponent
+                    {
+                        Rules = new List<ReportingDescriptor>
+                        {
+                            new ReportingDescriptor
+                            {
+                                Id = "TST0001"
+                            },
+                        },
+                    },
+                },
+            };
+
+            item = MakeErrorListItem(run, result);
+            item.HelpLink.Should().BeNull();
         }
 
         [Fact]

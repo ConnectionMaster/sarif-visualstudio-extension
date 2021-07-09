@@ -2,8 +2,8 @@
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -12,9 +12,15 @@ using System.Threading;
 using System.Windows;
 using System.Windows.Input;
 
+using EnvDTE;
+
+using EnvDTE80;
+
 using Microsoft.CodeAnalysis.Sarif;
+using Microsoft.CodeAnalysis.Sarif.Visitors;
 using Microsoft.Sarif.Viewer.Models;
 using Microsoft.Sarif.Viewer.Sarif;
+using Microsoft.Sarif.Viewer.Views;
 using Microsoft.VisualStudio.PlatformUI;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
@@ -42,24 +48,36 @@ namespace Microsoft.Sarif.Viewer
 
         private readonly IFileSystem _fileSystem;
 
+        private readonly ConcurrentDictionary<string, ResolveEmbeddedFileDialogResult> userDialogPreference;
+
         internal delegate string PromptForResolvedPathDelegate(SarifErrorListItem sarifErrorListItem, string pathFromLogFile);
 
+        internal delegate ResolveEmbeddedFileDialogResult PromptForEmbeddedFileDelegate(string sarifLogFilePath, bool hasEmbeddedContent, ConcurrentDictionary<string, ResolveEmbeddedFileDialogResult> preference);
+
         private readonly PromptForResolvedPathDelegate _promptForResolvedPathDelegate;
+
+        private readonly PromptForEmbeddedFileDelegate _promptForEmbeddedFileDelegate;
 
         // This ctor is internal rather than private for unit test purposes.
         internal CodeAnalysisResultManager(
             IFileSystem fileSystem,
-            PromptForResolvedPathDelegate promptForResolvedPathDelegate = null)
+            PromptForResolvedPathDelegate promptForResolvedPathDelegate = null,
+            PromptForEmbeddedFileDelegate promptForEmbeddedFileDelegate = null)
         {
             this._fileSystem = fileSystem;
             this._promptForResolvedPathDelegate = promptForResolvedPathDelegate ?? this.PromptForResolvedPath;
+            this._promptForEmbeddedFileDelegate = promptForEmbeddedFileDelegate ?? this.PromptForEmbeddedFile;
 
             this._allowedDownloadHosts = SdkUIUtilities.GetStoredObject<List<string>>(AllowedDownloadHostsFileName) ?? new List<string>();
 
             // Get temporary path for embedded files.
             this.temporaryFilePath = Path.GetTempPath();
             this.temporaryFilePath = Path.Combine(this.temporaryFilePath, TemporaryFileDirectoryName);
+
+            this.userDialogPreference = new ConcurrentDictionary<string, ResolveEmbeddedFileDialogResult>();
         }
+
+        public string TempDirectoryPath => this.temporaryFilePath;
 
         public static CodeAnalysisResultManager Instance = new CodeAnalysisResultManager(new FileSystem());
 
@@ -185,68 +203,57 @@ namespace Microsoft.Sarif.Viewer
                 return false;
             }
 
-            if (dataCache.FileDetails.ContainsKey(relativePath))
+            string solutionPath = this.GetSolutionPath();
+
+            // File contents embedded in SARIF.
+            bool hasHash = dataCache.FileDetails.TryGetValue(relativePath, out ArtifactDetailsModel model) && !string.IsNullOrEmpty(model?.Sha256Hash);
+            string embeddedTempFilePath = this.CreateFileFromContents(dataCache.FileDetails, relativePath);
+
+            try
             {
-                // File contents embedded in SARIF.
-                resolvedPath = this.CreateFileFromContents(dataCache.FileDetails, relativePath);
+                resolvedPath = this.GetFilePathFromHttp(sarifErrorListItem, uriBaseId, dataCache, relativePath);
             }
-            else
+            catch (WebException)
             {
-                if (uriBaseId != null
-                    && dataCache.OriginalUriBasePaths.TryGetValue(uriBaseId, out Uri baseUri)
-                    && Uri.TryCreate(baseUri, relativePath, out Uri uri)
-                    && uri.IsHttpScheme())
-                {
-                    bool allow = this._allowedDownloadHosts.Contains(uri.Host);
+                // failed to download the file
+                return false;
+            }
 
-                    // File needs to be downloaded, prompt for confirmation if host is not already allowed
-                    if (!allow)
-                    {
-                        MessageDialogCommand result = MessageDialog.Show(Resources.ConfirmDownloadDialog_Title,
-                                                                         string.Format(Resources.ConfirmDownloadDialog_Message, uri),
-                                                                         MessageDialogCommandSet.YesNo,
-                                                                         string.Format(Resources.ConfirmDownloadDialog_CheckboxLabel, uri.Host),
-                                                                         out bool alwaysAllow);
+            if (string.IsNullOrEmpty(resolvedPath))
+            {
+                // resolve path, existing file in local disk
+                resolvedPath = this.GetRebaselinedFileName(uriBaseId, relativePath, dataCache, solutionPath);
+            }
 
-                        if (result != MessageDialogCommand.No)
-                        {
-                            allow = true;
-
-                            if (alwaysAllow)
-                            {
-                                this.AddAllowedDownloadHost(uri.Host);
-                            }
-                        }
-                    }
-
-                    if (allow)
-                    {
-                        try
-                        {
-                            resolvedPath = this.DownloadFile(sarifErrorListItem, uri.ToString());
-                        }
-                        catch (WebException wex)
-                        {
-                            VsShellUtilities.ShowMessageBox(ServiceProvider.GlobalProvider,
-                                       Resources.DownloadFail_DialogMessage + Environment.NewLine + wex.Message,
-                                       null, // title
-                                       OLEMSGICON.OLEMSGICON_CRITICAL,
-                                       OLEMSGBUTTON.OLEMSGBUTTON_OK,
-                                       OLEMSGDEFBUTTON.OLEMSGDEFBUTTON_FIRST);
-                            return false;
-                        }
-                    }
-                }
-                else
-                {
-                    // User needs to locate file.
-                    resolvedPath = this.GetRebaselinedFileName(sarifErrorListItem, uriBaseId, relativePath, dataCache);
-                }
-
-                if (string.IsNullOrEmpty(resolvedPath) || relativePath.Equals(resolvedPath, StringComparison.OrdinalIgnoreCase))
+            // verify resolved file with artifact's Hash
+            if (hasHash)
+            {
+                string currentResolvedPath = resolvedPath;
+                if (!this.VerifyFileWithArtifactHash(sarifErrorListItem, relativePath, dataCache, currentResolvedPath, embeddedTempFilePath, out resolvedPath))
                 {
                     return false;
                 }
+            }
+
+            if (string.IsNullOrEmpty(resolvedPath))
+            {
+                // User needs to locate file.
+                resolvedPath = this._promptForResolvedPathDelegate(sarifErrorListItem, relativePath);
+            }
+
+            if (!string.IsNullOrEmpty(resolvedPath))
+            {
+                // save resolved path to mapping
+                if (!this.SaveResolvedPathToUriBaseMapping(uriBaseId, relativePath, relativePath, resolvedPath, dataCache))
+                {
+                    resolvedPath = relativePath;
+                }
+            }
+
+            if (string.IsNullOrEmpty(resolvedPath) || relativePath.Equals(resolvedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                resolvedPath = relativePath;
+                return false;
             }
 
             // Update all the paths in this run.
@@ -263,7 +270,22 @@ namespace Microsoft.Sarif.Viewer
         // Contents are embedded in SARIF. Create a file from these contents.
         internal string CreateFileFromContents(IDictionary<string, ArtifactDetailsModel> fileDetailsDictionary, string fileName)
         {
-            ArtifactDetailsModel fileData = fileDetailsDictionary[fileName];
+            if (!fileDetailsDictionary.TryGetValue(fileName, out ArtifactDetailsModel fileData))
+            {
+                return null;
+            }
+
+            if (!fileData.HasContent)
+            {
+                return null;
+            }
+
+            string contents = fileData.GetContents();
+            if (string.IsNullOrEmpty(contents))
+            {
+                // artifact doesn't have embedded contents
+                return null;
+            }
 
             string finalPath = this.temporaryFilePath;
 
@@ -309,7 +331,6 @@ namespace Microsoft.Sarif.Viewer
 
             if (!this._fileSystem.FileExists(finalPath))
             {
-                string contents = fileData.GetContents();
                 this._fileSystem.FileWriteAllText(finalPath, contents);
 
                 // File should be readonly, because it is embedded.
@@ -357,101 +378,31 @@ namespace Microsoft.Sarif.Viewer
         }
 
         // Internal rather than private for unit testability.
-        internal string GetRebaselinedFileName(SarifErrorListItem sarifErrorListItem, string uriBaseId, string pathFromLogFile, RunDataCache dataCache)
+        internal string GetRebaselinedFileName(string uriBaseId, string pathFromLogFile, RunDataCache dataCache, string solutionFullPath = null)
         {
             string originalPath = pathFromLogFile;
             Uri relativeUri = null;
+            string resolvedPath = null;
 
-            if (!string.IsNullOrEmpty(uriBaseId) && Uri.TryCreate(pathFromLogFile, UriKind.Relative, out relativeUri))
+            if (this.TryResolveFilePathFromUriBasePaths(uriBaseId, pathFromLogFile, dataCache, out relativeUri, out resolvedPath))
             {
-                // If the relative file path is relative to an unknown root,
-                // we need to strip the leading slash, so that we can relate
-                // the file path to an arbitrary remapped disk location.
-                if (pathFromLogFile.StartsWith("/"))
-                {
-                    pathFromLogFile = pathFromLogFile.Substring(1);
-                }
+                return resolvedPath;
+            }
 
-                if (dataCache.RemappedUriBasePaths.ContainsKey(uriBaseId))
-                {
-                    pathFromLogFile = new Uri(dataCache.RemappedUriBasePaths[uriBaseId], pathFromLogFile).LocalPath;
-                }
-                else if (dataCache.OriginalUriBasePaths.ContainsKey(uriBaseId))
-                {
-                    pathFromLogFile = new Uri(dataCache.OriginalUriBasePaths[uriBaseId], pathFromLogFile).LocalPath;
-                }
+            if (this.TryResolveFilePathFromRemappings(pathFromLogFile, dataCache, out resolvedPath))
+            {
+                return resolvedPath;
+            }
 
-                if (this._fileSystem.FileExists(pathFromLogFile))
+            if (!string.IsNullOrEmpty(solutionFullPath))
+            {
+                if (this.TryResolveFilePathFromSolution(solutionFullPath, originalPath, this._fileSystem, out resolvedPath))
                 {
-                    return pathFromLogFile;
+                    return resolvedPath;
                 }
             }
 
-            // Traverse our remappings and see if we can
-            // make rebaseline from existing data
-            foreach (Tuple<string, string> remapping in dataCache.RemappedPathPrefixes)
-            {
-                string remapped;
-                if (!string.IsNullOrEmpty(remapping.Item1))
-                {
-                    remapped = pathFromLogFile.Replace(remapping.Item1, remapping.Item2);
-                }
-                else
-                {
-                    remapped = Path.Combine(remapping.Item2, pathFromLogFile);
-                }
-
-                if (this._fileSystem.FileExists(remapped))
-                {
-                    return remapped;
-                }
-            }
-
-            string resolvedPath = this._promptForResolvedPathDelegate(sarifErrorListItem, pathFromLogFile);
-            if (resolvedPath == null)
-            {
-                return pathFromLogFile;
-            }
-
-            string fullPathFromLogFile = pathFromLogFile;
-            if (Uri.TryCreate(pathFromLogFile, UriKind.Absolute, out Uri absoluteUri))
-            {
-                fullPathFromLogFile = Path.GetFullPath(pathFromLogFile);
-            }
-            else
-            {
-                if (!fullPathFromLogFile.StartsWith("/"))
-                {
-                    fullPathFromLogFile = "/" + fullPathFromLogFile;
-                }
-            }
-
-            string commonSuffix = GetCommonSuffix(fullPathFromLogFile.Replace("/", @"\"), resolvedPath);
-            if (commonSuffix == null)
-            {
-                return pathFromLogFile;
-            }
-
-            // Trim the common suffix from both paths, and add a remapping that converts
-            // one prefix to the other.
-            string originalPrefix = fullPathFromLogFile.Substring(0, fullPathFromLogFile.Length - commonSuffix.Length);
-            string resolvedPrefix = resolvedPath.Substring(0, resolvedPath.Length - commonSuffix.Length);
-
-            int uriBaseIdEndIndex = resolvedPath.IndexOf(originalPath.Replace("/", @"\"));
-
-            if (relativeUri != null && uriBaseIdEndIndex >= 0)
-            {
-                // If we could determine the uriBaseId substitution value, then add it to the map.
-                dataCache.RemappedUriBasePaths[uriBaseId] = new Uri(resolvedPath.Substring(0, uriBaseIdEndIndex), UriKind.Absolute);
-            }
-            else
-            {
-                // If there's no relativeUri/uriBaseId pair or we couldn't determine the uriBaseId value,
-                // map the original prefix to the new prefix.
-                dataCache.RemappedPathPrefixes.Add(new Tuple<string, string>(originalPrefix, resolvedPrefix));
-            }
-
-            return resolvedPath;
+            return null;
         }
 
         internal void RemapFilePaths(IList<SarifErrorListItem> sarifErrors, string originalPath, string remappedPath)
@@ -486,6 +437,45 @@ namespace Microsoft.Sarif.Viewer
                 bool? dialogResult = openFileDialog.ShowDialog();
 
                 return dialogResult == true ? openFileDialog.FileName : null;
+            }
+            finally
+            {
+                elementWithFocus?.Focus();
+            }
+        }
+
+        private ResolveEmbeddedFileDialogResult PromptForEmbeddedFile(string sarifLogFilePath, bool hasEmbeddedContent, ConcurrentDictionary<string, ResolveEmbeddedFileDialogResult> userPreference)
+        {
+            // Opening the OpenFileDialog causes the TreeView to lose focus,
+            // which in turn causes the TreeViewItem selection to be unpredictable
+            // (because the selection event relies on the TreeViewItem focus.)
+            // We'll save the element which currently has focus and then restore
+            // focus after the OpenFileDialog is closed.
+            var elementWithFocus = Keyboard.FocusedElement as UIElement;
+
+            try
+            {
+                ResolveEmbeddedFileDialogResult dialogResult;
+                if (userPreference.TryGetValue(sarifLogFilePath, out ResolveEmbeddedFileDialogResult preference) &&
+                    preference != ResolveEmbeddedFileDialogResult.None &&
+
+                    // if preference is OpenEmbeddedFileContent but this result has no embedded content, should ignore this preference
+                    !(!hasEmbeddedContent && preference == ResolveEmbeddedFileDialogResult.OpenEmbeddedFileContent))
+                {
+                    dialogResult = preference;
+                }
+                else
+                {
+                    var dialog = new ResolveEmbeddedFileDialog(hasEmbeddedContent);
+                    dialog.ShowModal();
+                    dialogResult = dialog.Result;
+                    if (dialog.ApplyUserPreference)
+                    {
+                        userPreference.AddOrUpdate(sarifLogFilePath, dialogResult, (key, value) => dialogResult);
+                    }
+                }
+
+                return dialogResult;
             }
             finally
             {
@@ -556,6 +546,307 @@ namespace Microsoft.Sarif.Viewer
         {
             // Unit tests will only create one cache.
             return this.RunIndexToRunDataCache.Values.First().RemappedPathPrefixes.ToArray();
+        }
+
+        // Extract selected results from original SarifLog.
+        internal SarifLog GetPartitionedLog(IEnumerable<SarifErrorListItem> listItems)
+        {
+            int runIndex = -1;
+            string guid = Guid.NewGuid().ToString();
+            foreach (SarifErrorListItem item in listItems)
+            {
+                if (item.SarifResult != null)
+                {
+                    item.SarifResult.Guid = guid;
+                    if (runIndex == -1)
+                    {
+                        runIndex = item.RunIndex;
+                    }
+                }
+            }
+
+            if (runIndex == -1 || !this.RunIndexToRunDataCache.TryGetValue(runIndex, out RunDataCache dataCache) || dataCache.SarifLog == null)
+            {
+                return null;
+            }
+
+            // parition results in log
+            PartitionFunction<string> partitionFunction = (result) => result.Guid ?? null;
+            var partitioningVisitor = new PartitioningVisitor<string>(partitionFunction, deepClone: false);
+            partitioningVisitor.VisitSarifLog(dataCache.SarifLog);
+            Dictionary<string, SarifLog> partitions = partitioningVisitor.GetPartitionLogs();
+            return partitions[guid];
+        }
+
+        internal string GetFilePathFromHttp(SarifErrorListItem sarifErrorListItem, string uriBaseId, RunDataCache dataCache, string pathFromLogFile)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+
+            if (uriBaseId != null
+                    && dataCache.OriginalUriBasePaths.TryGetValue(uriBaseId, out Uri baseUri)
+                    && Uri.TryCreate(baseUri, pathFromLogFile, out Uri uri)
+                    && uri.IsHttpScheme())
+            {
+                bool allow = this._allowedDownloadHosts.Contains(uri.Host);
+
+                // File needs to be downloaded, prompt for confirmation if host is not already allowed
+                if (!allow)
+                {
+                    MessageDialogCommand result = MessageDialog.Show(Resources.ConfirmDownloadDialog_Title,
+                                                                     string.Format(Resources.ConfirmDownloadDialog_Message, uri),
+                                                                     MessageDialogCommandSet.YesNo,
+                                                                     string.Format(Resources.ConfirmDownloadDialog_CheckboxLabel, uri.Host),
+                                                                     out bool alwaysAllow);
+
+                    if (result != MessageDialogCommand.No)
+                    {
+                        allow = true;
+
+                        if (alwaysAllow)
+                        {
+                            this.AddAllowedDownloadHost(uri.Host);
+                        }
+                    }
+                }
+
+                if (allow)
+                {
+                    try
+                    {
+                        return this.DownloadFile(sarifErrorListItem, uri.ToString());
+                    }
+                    catch (WebException wex)
+                    {
+                        VsShellUtilities.ShowMessageBox(ServiceProvider.GlobalProvider,
+                                   Resources.DownloadFail_DialogMessage + Environment.NewLine + wex.Message,
+                                   null, // title
+                                   OLEMSGICON.OLEMSGICON_CRITICAL,
+                                   OLEMSGBUTTON.OLEMSGBUTTON_OK,
+                                   OLEMSGDEFBUTTON.OLEMSGDEFBUTTON_FIRST);
+                        throw wex;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        internal bool TryResolveFilePathFromSolution(string solutionPath, string pathFromLogFile, IFileSystem fileSystem, out string resolvedPath)
+        {
+            resolvedPath = null;
+            try
+            {
+                pathFromLogFile = pathFromLogFile.Replace('/', '\\');
+                string solutionDirectory = solutionPath.Substring(0, solutionPath.LastIndexOf('\\') + 1);
+                string fileToSearch = pathFromLogFile.Substring(pathFromLogFile.LastIndexOf('\\') + 1);
+
+                IEnumerable<string> searchResults = fileSystem.DirectoryEnumerateFiles(solutionDirectory, fileToSearch, SearchOption.AllDirectories);
+                searchResults = searchResults.Where(path => path.EndsWith(pathFromLogFile, StringComparison.OrdinalIgnoreCase));
+
+                // if path like "\AssemblyInfo.cs" it may exists in many projects.
+                // Here try to find a unique file matching the path,
+                // if more than 1 files match the path, we cannot decide which file to select, need manual intervention
+                if (searchResults.ToList().Count == 1)
+                {
+                    resolvedPath = searchResults.FirstOrDefault();
+                    return true;
+                }
+            }
+            catch
+            {
+                // do not threw exception so that it keeps trying to resolve path the next
+            }
+
+            return false;
+        }
+
+        internal bool TryResolveFilePathFromUriBasePaths(string uriBaseId, string pathFromLogFile, RunDataCache dataCache, out Uri relativeUri, out string resolvedPath)
+        {
+            relativeUri = null;
+            resolvedPath = null;
+            if (!string.IsNullOrEmpty(uriBaseId) && Uri.TryCreate(pathFromLogFile, UriKind.Relative, out relativeUri))
+            {
+                // If the relative file path is relative to an unknown root,
+                // we need to strip the leading slash, so that we can relate
+                // the file path to an arbitrary remapped disk location.
+                if (pathFromLogFile.StartsWith("/"))
+                {
+                    pathFromLogFile = pathFromLogFile.Substring(1);
+                }
+
+                if (dataCache.RemappedUriBasePaths.TryGetValue(uriBaseId, out Uri baseUri))
+                {
+                    pathFromLogFile = new Uri(baseUri, pathFromLogFile).LocalPath;
+                }
+                else if (dataCache.OriginalUriBasePaths.TryGetValue(uriBaseId, out Uri originalBaseUri))
+                {
+                    pathFromLogFile = new Uri(originalBaseUri, pathFromLogFile).LocalPath;
+                }
+
+                if (this._fileSystem.FileExists(pathFromLogFile))
+                {
+                    resolvedPath = pathFromLogFile;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        internal bool TryResolveFilePathFromRemappings(string pathFromLogFile, RunDataCache dataCache, out string resolvedPath)
+        {
+            resolvedPath = null;
+
+            // Traverse our remappings and see if we can
+            // make rebaseline from existing data
+            foreach (Tuple<string, string> remapping in dataCache.RemappedPathPrefixes)
+            {
+                string remapped;
+                if (!string.IsNullOrEmpty(remapping.Item1))
+                {
+                    remapped = pathFromLogFile.Replace(remapping.Item1, remapping.Item2);
+                }
+                else
+                {
+                    remapped = Path.Combine(remapping.Item2, pathFromLogFile);
+                }
+
+                if (this._fileSystem.FileExists(remapped))
+                {
+                    resolvedPath = remapped;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        internal bool SaveResolvedPathToUriBaseMapping(string uriBaseId, string originalPath, string pathFromLogFile, string resolvedPath, RunDataCache dataCache)
+        {
+            Uri.TryCreate(pathFromLogFile, UriKind.Relative, out Uri relativeUri);
+            string fullPathFromLogFile = pathFromLogFile;
+            if (Uri.TryCreate(pathFromLogFile, UriKind.Absolute, out Uri absoluteUri))
+            {
+                fullPathFromLogFile = Path.GetFullPath(pathFromLogFile);
+            }
+            else
+            {
+                if (!fullPathFromLogFile.StartsWith("/"))
+                {
+                    fullPathFromLogFile = "/" + fullPathFromLogFile;
+                }
+            }
+
+            string commonSuffix = GetCommonSuffix(fullPathFromLogFile.Replace("/", @"\"), resolvedPath);
+            if (commonSuffix == null)
+            {
+                return false;
+            }
+
+            // Trim the common suffix from both paths, and add a remapping that converts
+            // one prefix to the other.
+            string originalPrefix = fullPathFromLogFile.Substring(0, fullPathFromLogFile.Length - commonSuffix.Length);
+            string resolvedPrefix = resolvedPath.Substring(0, resolvedPath.Length - commonSuffix.Length);
+
+            int uriBaseIdEndIndex = resolvedPath.IndexOf(originalPath.Replace("/", @"\"));
+
+            if (!string.IsNullOrEmpty(uriBaseId) && relativeUri != null && uriBaseIdEndIndex >= 0)
+            {
+                // If we could determine the uriBaseId substitution value, then add it to the map.
+                dataCache.RemappedUriBasePaths[uriBaseId] = new Uri(resolvedPath.Substring(0, uriBaseIdEndIndex), UriKind.Absolute);
+            }
+            else
+            {
+                // If there's no relativeUri/uriBaseId pair or we couldn't determine the uriBaseId value,
+                // map the original prefix to the new prefix.
+                dataCache.RemappedPathPrefixes.Add(new Tuple<string, string>(originalPrefix, resolvedPrefix));
+            }
+
+            return true;
+        }
+
+        // return false means cannot resolve local file and will use embedded file.
+        internal bool VerifyFileWithArtifactHash(SarifErrorListItem sarifErrorListItem, string pathFromLogFile, RunDataCache dataCache, string resolvedPath, string embeddedTempFilePath, out string newResolvedPath)
+        {
+            newResolvedPath = null;
+
+            if (string.IsNullOrEmpty(resolvedPath))
+            {
+                // cannot find corresponding file in local, then use embedded file
+                newResolvedPath = embeddedTempFilePath;
+                return true;
+            }
+
+            if (!dataCache.FileDetails.TryGetValue(pathFromLogFile, out ArtifactDetailsModel fileData))
+            {
+                // has no embedded file, return the path resolved till now
+                newResolvedPath = resolvedPath;
+                return true;
+            }
+
+            string fileHash = this.GetFileHash(this._fileSystem, resolvedPath);
+
+            if (fileHash.Equals(fileData.Sha256Hash, StringComparison.OrdinalIgnoreCase))
+            {
+                // found a file in file system which has same hashcode as embeded content.
+                newResolvedPath = resolvedPath;
+                return true;
+            }
+
+            bool hasEmbeddedContent = !string.IsNullOrEmpty(embeddedTempFilePath);
+            ResolveEmbeddedFileDialogResult dialogResult = this._promptForEmbeddedFileDelegate(sarifErrorListItem.LogFilePath, hasEmbeddedContent, this.userDialogPreference);
+
+            switch (dialogResult)
+            {
+                case ResolveEmbeddedFileDialogResult.None:
+                    // dialog is cancelled.
+                    newResolvedPath = null;
+                    return false;
+                case ResolveEmbeddedFileDialogResult.OpenEmbeddedFileContent:
+                    newResolvedPath = embeddedTempFilePath;
+                    return true;
+                case ResolveEmbeddedFileDialogResult.OpenLocalFileFromSolution:
+                    newResolvedPath = resolvedPath;
+                    return true;
+                case ResolveEmbeddedFileDialogResult.BrowseAlternateLocation:
+                    // if returns null means user cancelled the open file dialog.
+                    newResolvedPath = this._promptForResolvedPathDelegate(sarifErrorListItem, pathFromLogFile);
+                    return !string.IsNullOrEmpty(newResolvedPath);
+                default:
+                    return false;
+            }
+        }
+
+        private string GetFileHash(IFileSystem fileSystem, string filePath)
+        {
+            if (!fileSystem.FileExists(filePath))
+            {
+                return null;
+            }
+
+            using (Stream stream = fileSystem.FileOpenRead(filePath))
+            {
+                return HashHelper.GenerateHash(stream);
+            }
+        }
+
+        private string GetSolutionPath()
+        {
+            if (!SarifViewerPackage.IsUnitTesting)
+            {
+#pragma warning disable VSTHRD108 // Assert thread affinity unconditionally
+                ThreadHelper.ThrowIfNotOnUIThread();
+#pragma warning restore VSTHRD108
+            }
+
+            string solutionPath = null;
+            DTE2 dte = (DTE2)Package.GetGlobalService(typeof(DTE));
+            if (dte.Solution != null && dte.Solution.IsOpen)
+            {
+                solutionPath = dte.Solution.FullName;
+            }
+
+            return solutionPath;
         }
     }
 }

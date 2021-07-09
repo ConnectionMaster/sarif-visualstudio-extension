@@ -99,11 +99,74 @@ namespace Microsoft.Sarif.Viewer {
         }
         
         /// <summary>
+        ///   Looks up a localized string similar to Browse to Another Location….
+        /// </summary>
+        public static string ConfirmSourceFileDialog_BrowseFileButton {
+            get {
+                return ResourceManager.GetString("ConfirmSourceFileDialog_BrowseFileButton", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to This SARIF log has embedded source code for this analysis result that we can show. We also found a file in your solution/enlistment that matches the relevant file path, but it isn’t the same version of the file that was scanned when the log file was produced. What would you like to do?.
+        /// </summary>
+        public static string ConfirmSourceFileDialog_Message {
+            get {
+                return ResourceManager.GetString("ConfirmSourceFileDialog_Message", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to We found a file in your solution/enlistment that matches the file path for this result, but the file isn’t the same version that was scanned when the log file was produced. What would you like to do?.
+        /// </summary>
+        public static string ConfirmSourceFileDialog_Message_NoEmbedded {
+            get {
+                return ResourceManager.GetString("ConfirmSourceFileDialog_Message_NoEmbedded", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Open Local File.
+        /// </summary>
+        public static string ConfirmSourceFileDialog_OpenFileButton {
+            get {
+                return ResourceManager.GetString("ConfirmSourceFileDialog_OpenFileButton", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Remember my choice for other results from same SARIF log..
+        /// </summary>
+        public static string ConfirmSourceFileDialog_RememberMyChoice {
+            get {
+                return ResourceManager.GetString("ConfirmSourceFileDialog_RememberMyChoice", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Confirm Source File Location.
+        /// </summary>
+        public static string ConfirmSourceFileDialog_Title {
+            get {
+                return ResourceManager.GetString("ConfirmSourceFileDialog_Title", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Show Embedded File Content.
+        /// </summary>
+        public static string ConfirmSourceFileDialog_ViewEmbeddedFileButton {
+            get {
+                return ResourceManager.GetString("ConfirmSourceFileDialog_ViewEmbeddedFileButton", resourceCulture);
+            }
+        }
+        
+        /// <summary>
         ///   Looks up a localized string similar to Continuing.
         /// </summary>
-        public static string ContinuingCallTreeNodeMessage {
+        public static string ContinuingAnalysisStepNodeMessage {
             get {
-                return ResourceManager.GetString("ContinuingCallTreeNodeMessage", resourceCulture);
+                return ResourceManager.GetString("ContinuingAnalysisStepNodeMessage", resourceCulture);
             }
         }
         
@@ -198,7 +261,7 @@ namespace Microsoft.Sarif.Viewer {
         }
         
         /// <summary>
-        ///   Looks up a localized string similar to {0} rule &quot;{1}&quot; wasn&apos;t useful because it didn&apos;t flag an actual problem (i.e., it is a false positive)..
+        ///   Looks up a localized string similar to The result wasn&apos;t useful because it didn&apos;t flag an actual problem (i.e., it is a false positive)..
         /// </summary>
         public static string FalsePositiveSummary {
             get {
@@ -315,6 +378,15 @@ namespace Microsoft.Sarif.Viewer {
         }
         
         /// <summary>
+        ///   Looks up a localized string similar to Heimdall Data Format log file (*.json)|*.json.
+        /// </summary>
+        public static string ImportHdfFilter {
+            get {
+                return ResourceManager.GetString("ImportHdfFilter", resourceCulture);
+            }
+        }
+        
+        /// <summary>
         ///   Looks up a localized string similar to Import analysis log.
         /// </summary>
         public static string ImportLogOpenFileDialogTitle {
@@ -414,7 +486,7 @@ namespace Microsoft.Sarif.Viewer {
         }
         
         /// <summary>
-        ///   Looks up a localized string similar to {0} rule &quot;{1}&quot; was accurate but not useful because the code improvement to resolve is relatively low value..
+        ///   Looks up a localized string similar to The result was accurate but not useful because the code improvement to resolve is relatively low value..
         /// </summary>
         public static string LowValueSummary {
             get {
@@ -432,7 +504,7 @@ namespace Microsoft.Sarif.Viewer {
         }
         
         /// <summary>
-        ///   Looks up a localized string similar to {0} rule &quot;{1}&quot; wasn&apos;t useful because the information provided for it wasn&apos;t actionable (couldn&apos;t be understood or was incomplete)..
+        ///   Looks up a localized string similar to The result wasn&apos;t useful because the information provided for it wasn&apos;t actionable (couldn&apos;t be understood or was incomplete)..
         /// </summary>
         public static string NonActionableSummary {
             get {
@@ -450,11 +522,29 @@ namespace Microsoft.Sarif.Viewer {
         }
         
         /// <summary>
-        ///   Looks up a localized string similar to {0} rule &quot;{1}&quot; wasn&apos;t useful because it was reported against non-shipping code..
+        ///   Looks up a localized string similar to The result wasn&apos;t useful because it was reported against non-shipping code..
         /// </summary>
         public static string NonShippingCodeSummary {
             get {
                 return ResourceManager.GetString("NonShippingCodeSummary", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Do you want to open the external website? {0}.
+        /// </summary>
+        public static string OpenExternalUri_DialogMessage {
+            get {
+                return ResourceManager.GetString("OpenExternalUri_DialogMessage", resourceCulture);
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized string similar to Open Hyperlink.
+        /// </summary>
+        public static string OpenExternalUri_DialogTitle {
+            get {
+                return ResourceManager.GetString("OpenExternalUri_DialogTitle", resourceCulture);
             }
         }
         
@@ -477,7 +567,7 @@ namespace Microsoft.Sarif.Viewer {
         }
         
         /// <summary>
-        ///   Looks up a localized string similar to {0} rule &quot;{1}&quot; wasn&apos;t useful.
+        ///   Looks up a localized string similar to The result wasn&apos;t useful.
         /// </summary>
         public static string OtherSummary {
             get {

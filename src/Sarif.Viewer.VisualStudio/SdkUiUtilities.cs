@@ -7,12 +7,15 @@ using System.Collections.Specialized;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.IO.IsolatedStorage;
+using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Forms;
 
 using Microsoft.CodeAnalysis.Sarif;
+using Microsoft.Sarif.Viewer.Sarif;
 using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
@@ -122,10 +125,6 @@ namespace Microsoft.Sarif.Viewer
             }
         }
 
-        /// <summary>
-        /// Open the document associated with this task item.
-        /// </summary>
-        /// <returns>The window frame of the opened document.</returns>
         [SuppressMessage("Microsoft.Usage", "CA1806:DoNotIgnoreMethodResults", Justification = "By design")]
         internal static IVsWindowFrame OpenDocument(IServiceProvider provider, string file, bool usePreviewPane)
         {
@@ -220,6 +219,7 @@ namespace Microsoft.Sarif.Viewer
         /// Find the document and return its cookie to the lock to the document.
         /// </summary>
         /// <param name="runningDocTable">The object having a table of all running documents.</param>
+        /// <param name="file">The file to be looked in the documents table.</param>
         /// <returns>The cookie to the document lock.</returns>
         internal static uint FindDocument(IVsRunningDocumentTable runningDocTable, string file)
         {
@@ -281,7 +281,8 @@ namespace Microsoft.Sarif.Viewer
         /// <summary>
         /// Helper method for getting a IWpfTextView from a IVsTextView object.
         /// </summary>
-        /// <param name="textView">a IWpfTextView object.</param>
+        /// <param name="textView">a IVsTextView object.</param>
+        /// <param name="wpfTextView">a IWpfTextView object.</param>
         /// <returns>If successfully gets IWpfTextView.</returns>
         public static bool TryGetWpfTextView(IVsTextView textView, out IWpfTextView wpfTextView)
         {
@@ -680,6 +681,27 @@ namespace Microsoft.Sarif.Viewer
         }
 
         /// <summary>
+        /// Convert a collection of Inline elements into plain text.
+        /// </summary>
+        /// <param name="inlines">A collection of Inline elements that represent the message.</param>
+        /// <returns>A plaint text of the message.</returns>
+        internal static string GetPlainText(IEnumerable<XamlDoc.Inline> inlines)
+        {
+            if (inlines == null || !inlines.Any())
+            {
+                return null;
+            }
+
+            StringBuilder stringBuilder = new StringBuilder();
+            foreach (XamlDoc.Inline inline in inlines)
+            {
+                stringBuilder.Append(new XamlDoc.TextRange(inline.ContentStart, inline.ContentEnd).Text);
+            }
+
+            return stringBuilder.ToString();
+        }
+
+        /// <summary>
         /// Removes escape backslashes that were used to suppress embedded linking.
         /// </summary>
         /// <param name="s">The string to be processed.</param>
@@ -698,18 +720,47 @@ namespace Microsoft.Sarif.Viewer
                 RunDataCache dataCache = CodeAnalysisResultManager.Instance.RunIndexToRunDataCache[runId];
 
                 Uri uri = artifactLocation.Uri;
-                string uriBaseId = artifactLocation.UriBaseId;
 
+                // try to resolve path using OriginalUriBasePaths
+                string uriBaseId = artifactLocation.UriBaseId;
                 if (!string.IsNullOrEmpty(uriBaseId) && dataCache.OriginalUriBasePaths.ContainsKey(uriBaseId))
                 {
                     Uri baseUri = dataCache.OriginalUriBasePaths[uriBaseId];
                     uri = new Uri(baseUri, uri);
                 }
 
-                path = uri.LocalPath;
+                try
+                {
+                    path = uri.LocalPath;
+                }
+                catch (InvalidOperationException)
+                {
+                    // if cannot resolve local path return original uri string
+                    // it will try to resolve the path when user navigates to the error list item
+                    path = uri.ToPath();
+                }
             }
 
             return path;
+        }
+
+        internal static bool OpenExternalUrl(string uriString, int maxLength = 150)
+        {
+            if (!string.IsNullOrEmpty(uriString) && Uri.TryCreate(uriString, UriKind.RelativeOrAbsolute, out Uri result))
+            {
+                uriString = uriString.Length > maxLength ? uriString.Substring(0, maxLength) + " \u2026" : uriString;
+                if (System.Windows.Forms.MessageBox.Show(
+                                            string.Format(Resources.OpenExternalUri_DialogMessage, Environment.NewLine + uriString),
+                                            Resources.OpenExternalUri_DialogTitle,
+                                            MessageBoxButtons.YesNo,
+                                            MessageBoxIcon.Warning) == DialogResult.Yes)
+                {
+                    System.Diagnostics.Process.Start(uriString)?.Dispose();
+                    return true;
+                }
+            }
+
+            return false;
         }
     }
 }
